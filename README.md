@@ -36,7 +36,7 @@ optional arguments:
 ```
 A typical invocation would look like this. The arguments are pretty self-describing.
 ```
-# ./arp-spoof --interface eth0 --own 192.168.0.33 --target 192.168.0.254 --gateway 192.168.0.1 --log-traffic
+# ./arp-spoof --interface eth0 --own 192.168.0.100 --target 192.168.0.16 --gateway 192.168.0.1 --log-traffic
 Own mac address for eth0 is: 95:8F:6F:17:36:71
 [+] forwarding ipv4 traffic: true
 Found 7E:FA:8B:B2:F5:8A at 192.168.0.16
@@ -49,7 +49,7 @@ Found 7C:0B:B6:94:11:6B at 192.168.0.1
 ```
 # cargo build
 ```
-written with rust 1.5.0
+Tested with rust 1.5.0.
 
 
 ## Linux
