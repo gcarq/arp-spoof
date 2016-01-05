@@ -1,0 +1,10 @@
+[package]
+name = "arp-spoof"
+version = "0.2.0"
+authors = ["gcarq <gcarq@null>"]
+
+[dependencies]
+pcap = "*"
+argparse = "*"
+nix = "*"
+time = "*"
