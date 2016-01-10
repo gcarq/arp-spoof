@@ -7,6 +7,7 @@ use std::net::Ipv4Addr;
 use pcap;
 
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct Ethernet {
     pub dest_mac: [u8; 6],        /* Target hardware address */
     pub source_mac: [u8; 6],      /* Sender hardware address */
@@ -35,6 +36,7 @@ pub enum ArpType {
 /* ARP Header, (assuming Ethernet+IPv4)                      */
 /* Values are stored as big endian                           */
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct ArpHeader {
     pub ethernet: Ethernet,       /* Ethernet frame          */
     pub hardware_type: u16,       /* Hardware Type           */
