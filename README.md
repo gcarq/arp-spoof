@@ -6,6 +6,8 @@ This is a minimal ARP-Spoofing tool written in **Rust language** using pcap.
 This tool allows intercepting Ipv4 traffic between two hosts on the same network.
 Typically between one machine and the internet gateway.
 
+Please note, this tool was created to get comfortable with Rust, so the code isn't necessarily optimal nor idiomatic.
+
 **This tool is for educational purposes only.**
 
 ## Features:
