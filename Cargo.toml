@@ -2,9 +2,10 @@
 name = "arp-spoof"
 version = "0.2.0"
 authors = ["gcarq <gcarq@null>"]
+edition = "2018"
 
 [dependencies]
-pcap = "*"
-argparse = "*"
-nix = "*"
-time = "*"
+pcap = "^0.7"
+argparse = "^0.2"
+nix = "^0.18"
+time = "^0.2"
