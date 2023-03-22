@@ -1,32 +1,33 @@
 extern crate argparse;
 extern crate nix;
 extern crate pcap;
-extern crate time;
 
-use std::fs::{File, OpenOptions};
-use std::io::stdout;
-use std::io::Error;
-use std::io::{Read, Write};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::process;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 use argparse::{ArgumentParser, Print, Store, StoreFalse, StoreTrue};
 use nix::sys::signal;
 use nix::sys::signal::SigHandler;
+use pcap::Device;
 
-pub mod arp;
+use crate::utils::{get_interface_mac_addr, ip_forward, mac_to_string};
+
+mod arp;
+mod utils;
+
+macro_rules! abort {
+    ($($arg:tt)*) => {{
+        println!($($arg)*);
+        process::exit(1);
+    }};
+}
 
 /// Struct which holds all possible arguments
 struct ArgOptions {
     interface: String,
-    own_ip: Ipv4Addr,
     target_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
     ip_forward: bool,
-    verbose: bool,
     log_traffic: bool,
 }
 
@@ -38,102 +39,88 @@ fn main() {
         signal::SigSet::empty(),
     );
     unsafe {
-        match signal::sigaction(signal::SIGINT, &sig_action) {
-            Ok(_) => (),
-            Err(e) => panic!("Unable to register SIGINT handler: {}", e),
-        }
+        signal::sigaction(signal::SIGINT, &sig_action).expect("Unable to register SIGINT handler");
     }
 
     let arg_options = parse_args();
+    let all_devices = Device::list().expect("Unable to list devices");
+    let device = match all_devices
+        .into_iter()
+        .filter(|d| d.name == arg_options.interface)
+        .last()
+    {
+        Some(d) => d,
+        None => {
+            abort!("Given interface \"{}\" not found", arg_options.interface)
+        }
+    };
 
-    let own_mac_addr = get_interface_mac_addr(arg_options.interface.as_ref());
-    println!(
-        "Own mac address for {} is: {}",
-        arg_options.interface,
-        arp::mac_to_string(&own_mac_addr)
+    // Resolve IP and MAC address
+    let own_ip_addr = match resolve_own_ip_addr(&device) {
+        Some(ip) => ip,
+        None => {
+            abort!("Unable to get address for interface")
+        }
+    };
+    let own_mac_addr = get_interface_mac_addr(&arg_options.interface);
+    println!("[*] Using device {} ...\n -> ip address: {}\n -> mac address: {}\n -> connection_status: {:?}",
+             device.name,
+             own_ip_addr,
+             mac_to_string(&own_mac_addr),
+             device.flags.connection_status,
     );
 
     // Enable kernel ip forwarding
     if arg_options.ip_forward {
-        match ip_forward(arg_options.ip_forward) {
-            Ok(_) => (),
-            Err(e) => panic!("ip_forward() failed! {}", e),
-        }
+        ip_forward(arg_options.ip_forward).expect("ip_forward failed!");
     }
 
-    // Enable traffic logging
-    if arg_options.log_traffic {
-        let log_cap_filter = format!("host {}", arg_options.target_ip);
-        let mut log_cap = pcap_open(arg_options.interface.as_ref(), log_cap_filter.as_ref(), 0);
-        thread::spawn(move || {
-            log_traffic_pcap(&mut log_cap, "save.pcap");
-        });
-    }
-
-    // Start arp spoofing
-    let cap_ptr = Arc::new(Mutex::new(pcap_open(
-        arg_options.interface.as_ref(),
-        "arp",
-        5000,
-    )));
     arp::arp_poisoning(
-        cap_ptr,
+        device,
         own_mac_addr,
-        arg_options.own_ip,
+        own_ip_addr,
         arg_options.target_ip,
         arg_options.gateway_ip,
+        arg_options.log_traffic,
     );
 }
 
-/// Opens a pcap capture device
-fn pcap_open(
-    interface_name: &str,
-    pcap_filter: &str,
-    pcap_timeout: i32,
-) -> pcap::Capture<pcap::Active> {
-    let mut cap = pcap::Capture::from_device(interface_name)
-        .unwrap()
-        .timeout(pcap_timeout)
-        .open()
-        .unwrap();
-    cap.filter(pcap_filter).unwrap();
-    cap
+/// Resolves the ip addresses for the given device and returns the first one found
+fn resolve_own_ip_addr(device: &Device) -> Option<Ipv4Addr> {
+    device
+        .addresses
+        .iter()
+        .filter_map(|i| match i.addr {
+            IpAddr::V4(ipv4) => Some(ipv4),
+            _ => None,
+        })
+        .last()
 }
 
 /// extern "C" sigint handler
 extern "C" fn handle_sigint(_: i32) {
-    println!("\nInterrupted!");
     match ip_forward(false) {
         Ok(_) => (),
         Err(e) => println!("{}", e),
     }
-    process::exit(1);
+    abort!("\nInterrupted!");
 }
 
 /// Parses args or panics if something is missing.
 fn parse_args() -> ArgOptions {
     let mut options = ArgOptions {
         interface: String::from(""),
-        own_ip: Ipv4Addr::new(0, 0, 0, 0),
         target_ip: Ipv4Addr::new(0, 0, 0, 0),
         gateway_ip: Ipv4Addr::new(0, 0, 0, 0),
         ip_forward: true,
-        verbose: false,
         log_traffic: false,
     };
     {
         // This block limits scope of borrows by ap.refer() method
         let mut ap = ArgumentParser::new();
-        ap.set_description("Minimal ARP spoofing tool written in rust.");
+        ap.set_description("Minimal ARP spoofing tool written in Rust.");
         ap.refer(&mut options.interface)
             .add_option(&["-i", "--interface"], Store, "interface name")
-            .required();
-        ap.refer(&mut options.own_ip)
-            .add_option(
-                &["--own"],
-                Store,
-                "own ipv4 address (required until pcap allows ip enumeration)",
-            )
             .required();
         ap.refer(&mut options.target_ip)
             .add_option(&["--target"], Store, "target ipv4 address")
@@ -151,8 +138,6 @@ fn parse_args() -> ArgOptions {
             StoreFalse,
             "leave `/proc/sys/net/ipv4/ip_forward` untouched",
         );
-        ap.refer(&mut options.verbose)
-            .add_option(&["-v", "--verbose"], StoreTrue, "be verbose");
         ap.add_option(
             &["-V", "--version"],
             Print(env!("CARGO_PKG_VERSION").to_string()),
@@ -160,65 +145,10 @@ fn parse_args() -> ArgOptions {
         );
         ap.parse_args_or_exit();
     }
-    // FIXME: use of unstable library feature 'ip': extra functionality has not been scrutinized to the level that it should be stable (see issue #27709)
-    //assert_eq!(true, options.target_ip.is_private());
-    //assert_eq!(true, options.gateway_ip.is_private());
-    options
-}
-
-/// Logs traffic to pcap file and prints network statistic
-pub fn log_traffic_pcap(cap: &mut pcap::Capture<pcap::Active>, log_file: &str) {
-    let mut savefile = cap.savefile(log_file).unwrap();
-
-    let mut last_stats = time::precise_time_s();
-    let stats_threshold = 15.0;
-    loop {
-        {
-            let packet = cap.next().unwrap();
-            savefile.write(&packet);
-        }
-        if (time::precise_time_s() - last_stats) > stats_threshold {
-            let stats = cap.stats().unwrap();
-            print!(
-                "\r[*] Received: {}, dropped: {}, if_dropped: {}",
-                stats.received, stats.dropped, stats.if_dropped
-            );
-            match stdout().flush() {
-                Ok(_) => (),
-                Err(e) => println!("{}", e),
-            }
-            last_stats = time::precise_time_s();
+    for ip in [options.target_ip, options.gateway_ip] {
+        if !ip.is_private() {
+            abort!("{} is no private ip address", ip);
         }
     }
-}
-
-/// Modifies `/proc/sys/net/ipv4/ip_forward` to enable/disable ip forwarding
-fn ip_forward(enable: bool) -> Result<(), Error> {
-    let ipv4_fw_path = "/proc/sys/net/ipv4/ip_forward";
-    let ipv4_fw_value = match enable {
-        true => "1\n",
-        false => "0\n",
-    };
-
-    let result = match OpenOptions::new().write(true).open(ipv4_fw_path) {
-        Ok(mut f) => f.write_all(String::from(ipv4_fw_value).as_bytes()),
-        Err(e) => panic!("Unable to open {}: {}", ipv4_fw_path, e),
-    };
-    println!("[+] forwarding ipv4 traffic: {}", enable);
-    result
-}
-
-/// This function is obsolete as soon as device info enumeration is implemented
-/// See: https://github.com/ebfull/pcap/issues/13
-fn get_interface_mac_addr(interface_name: &str) -> [u8; 6] {
-    let path = format!("/sys/class/net/{}/address", interface_name);
-    let mut mac_addr_buf = String::new();
-    match File::open(&path) {
-        Ok(mut f) => f.read_to_string(&mut mac_addr_buf).unwrap(),
-        Err(e) => panic!(
-            "Unable to read mac address from {} (Network interface down?): {}",
-            path, e
-        ),
-    };
-    arp::string_to_mac(String::from_str(mac_addr_buf.trim()).unwrap())
+    options
 }

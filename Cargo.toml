@@ -1,11 +1,10 @@
 [package]
 name = "arp-spoof"
-version = "0.2.0"
-authors = ["gcarq <gcarq@null>"]
-edition = "2018"
+version = "0.3.0"
+authors = ["gcarq <egger.m@protonmail.com>"]
+edition = "2021"
 
 [dependencies]
-pcap = "^0.7"
+pcap = "^1.0.0"
 argparse = "^0.2"
-nix = "^0.18"
-time = "^0.2"
+nix = "^0.26.2"

