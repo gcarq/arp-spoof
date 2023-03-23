@@ -35,7 +35,7 @@ optional arguments:
 ```
 A typical invocation would look like this. The arguments are pretty self-describing.
 ```
-# ./arp-spoof --interface eth0 --own 192.168.0.100 --target 192.168.0.16 --gateway 192.168.0.1 --log-traffic
+# ./arp-spoof --interface eth0 --target 192.168.0.16 --gateway 192.168.0.1 --log-traffic
 [*] Using device eth0 ...
  -> ip address: 192.168.0.100
  -> mac address: 95:8F:6F:17:36:71
