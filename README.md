@@ -24,14 +24,13 @@ Usage:
 Minimal ARP spoofing tool written in Rust.
 
 optional arguments:
-  -h,--help             show this help message and exit
-  -i,--interface INTERFACE
-                        interface name
+  -h,--help                       show this help message and exit
+  -i,--interface INTERFACE        interface name
   -t, --target_ip TARGET_ip       target ipv4 address
   -g, --gateway_ip GATEWAY_ip     gateway ipv4 address
-  -l, --log-traffic         logs all target traffic to `save.pcap`
-  -f, --forward       leave `/proc/sys/net/ipv4/ip_forward` untouched
-  -V,--version          show version
+  -l, --log-traffic               logs all target traffic to `save.pcap`
+  -f, --forward                   leave `/proc/sys/net/ipv4/ip_forward` untouched
+  -V,--version                    show version
 ```
 A typical invocation would look like this. The arguments are pretty self-describing.
 ```
