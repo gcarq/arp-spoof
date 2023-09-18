@@ -2,18 +2,29 @@ extern crate argparse;
 extern crate nix;
 extern crate pcap;
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::process;
+use std::result::Result;
+use std::str::FromStr;
 
-use argparse::{ArgumentParser, Print, Store, StoreFalse, StoreTrue};
 use nix::sys::signal;
 use nix::sys::signal::SigHandler;
 use pcap::Device;
+use clap::Parser;
 
-use crate::utils::{get_interface_mac_addr, ip_forward, mac_to_string};
+use crate::utils::{
+    resolve_private_ipv4,
+    get_interface_mac_addr, 
+    mac_to_string, 
+    ip_forward,
+};
 
 mod arp;
 mod utils;
+mod error;
+
+use error::{CliError, NetUtilsError};
+
 
 macro_rules! abort {
     ($($arg:tt)*) => {{
@@ -22,79 +33,94 @@ macro_rules! abort {
     }};
 }
 
-/// Struct which holds all possible arguments
-struct ArgOptions {
+#[derive(Parser, Debug)]
+#[command(name = "arp-spoof")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(
+    help_template = "\n{name}\nVersion: {version}\n{about}\n\n{usage-heading} {usage} \n\n {all-args} {tab}\n\n"
+)]
+#[command(about, long_about = None)]
+/// Minimal ARP spoofing tool written in Rust.
+struct Cli {
+    #[arg(short = 'i', long = "interface")]
+    /// Name of local interface used for sending/receiving ARP and data packets 
     interface: String,
-    target_ip: Ipv4Addr,
-    gateway_ip: Ipv4Addr,
-    ip_forward: bool,
-    log_traffic: bool,
+
+    #[arg(short = 't', long = "target_ip")]
+    /// IP address of target device
+    target_ip: String,
+
+    #[arg(short = 'g', long = "gateway_ip")]
+    /// IP address of network gateway
+    gateway_ip: String,
+
+    #[arg(short = 'f', long = "forward_traffic")]
+    /// Flag which enables/disables your device forwarding the packets it receives
+    ip_forward: bool, // Defaults to false
+
+    #[arg(short = 'l', long = "log_traffic")]
+    /// Flag which enables/disables logging the received packets in a PCAP file
+    log_traffic: bool, // Defaults to false
 }
 
-fn main() {
-    // Define SIGINT handler
-    let sig_action = signal::SigAction::new(
-        SigHandler::Handler(handle_sigint),
-        signal::SaFlags::empty(),
-        signal::SigSet::empty(),
-    );
-    unsafe {
-        signal::sigaction(signal::SIGINT, &sig_action).expect("Unable to register SIGINT handler");
-    }
-
-    let arg_options = parse_args();
-    let all_devices = Device::list().expect("Unable to list devices");
-    let device = match all_devices
-        .into_iter()
-        .filter(|d| d.name == arg_options.interface)
-        .last()
-    {
-        Some(d) => d,
-        None => {
-            abort!("Given interface \"{}\" not found", arg_options.interface)
+impl Cli {
+    // Performs initial check of arguments supplied
+    pub fn validate_args(&mut self) -> Result<Device, CliError> {
+        // Check if an interface was supplied
+        if self.interface.is_empty() {
+            return Err(CliError::InterfaceEmpty);
         }
-    };
 
-    // Resolve IP and MAC address
-    let own_ip_addr = match resolve_own_ip_addr(&device) {
-        Some(ip) => ip,
-        None => {
-            abort!("Unable to get address for interface")
+        // Check if given interface is present
+        let all_devices = match Device::list() {
+            Ok(devices) => devices, // Vector of available network devices which can be opened with pcap
+            Err(e) => return Err(CliError::DeviceListError(e.to_string())),
+        };
+
+        let device = all_devices
+            .into_iter()
+            .filter(|d| d.name == self.interface)
+            .last();
+
+        if device.is_none() {
+            return Err(CliError::InterfaceNotFound(self.interface.clone()));
         }
-    };
-    let own_mac_addr = get_interface_mac_addr(&arg_options.interface);
-    println!("[*] Using device {} ...\n -> ip address: {}\n -> mac address: {}\n -> connection_status: {:?}",
-             device.name,
-             own_ip_addr,
-             mac_to_string(&own_mac_addr),
-             device.flags.connection_status,
-    );
 
-    // Enable kernel ip forwarding
-    if arg_options.ip_forward {
-        ip_forward(arg_options.ip_forward).expect("ip_forward failed!");
+        // Check if a target_ip was supplied
+        if self.target_ip.is_empty() {
+            return Err(CliError::TargetIpEmpty);
+        }
+
+        // Check if target_ip is valid
+        match Ipv4Addr::from_str(&self.target_ip) {
+            Ok(_) => {},
+            Err(e) => return Err(CliError::TargetIpInvalid(e.to_string())),
+        }
+
+        // Check if target_ip is private
+        if !Ipv4Addr::from_str(&self.target_ip).unwrap().is_private() {
+            return Err(CliError::TargetIpNotPrivate);
+        }
+
+        // Check if gateway IP was supplied
+        if self.gateway_ip.is_empty() {
+            return Err(CliError::GatewayEmpty);
+        }
+
+        // Check if gateway IP address is valid
+        match Ipv4Addr::from_str(&self.gateway_ip) {
+            Ok(_) => {},
+            Err(e) => return Err(CliError::GatewayInvalid(e.to_string())),
+        }
+
+        // Check if gateway IP is private
+        if !Ipv4Addr::from_str(&self.gateway_ip).unwrap().is_private() {
+            return Err(CliError::GatewayNotPrivate);
+        }
+
+        // Return the device from here to save from having to assign again in main
+        Ok(device.unwrap())
     }
-
-    arp::arp_poisoning(
-        device,
-        own_mac_addr,
-        own_ip_addr,
-        arg_options.target_ip,
-        arg_options.gateway_ip,
-        arg_options.log_traffic,
-    );
-}
-
-/// Resolves the ip addresses for the given device and returns the first one found
-fn resolve_own_ip_addr(device: &Device) -> Option<Ipv4Addr> {
-    device
-        .addresses
-        .iter()
-        .filter_map(|i| match i.addr {
-            IpAddr::V4(ipv4) => Some(ipv4),
-            _ => None,
-        })
-        .last()
 }
 
 /// extern "C" sigint handler
@@ -106,49 +132,70 @@ extern "C" fn handle_sigint(_: i32) {
     abort!("\nInterrupted!");
 }
 
-/// Parses args or panics if something is missing.
-fn parse_args() -> ArgOptions {
-    let mut options = ArgOptions {
-        interface: String::from(""),
-        target_ip: Ipv4Addr::new(0, 0, 0, 0),
-        gateway_ip: Ipv4Addr::new(0, 0, 0, 0),
-        ip_forward: true,
-        log_traffic: false,
-    };
-    {
-        // This block limits scope of borrows by ap.refer() method
-        let mut ap = ArgumentParser::new();
-        ap.set_description("Minimal ARP spoofing tool written in Rust.");
-        ap.refer(&mut options.interface)
-            .add_option(&["-i", "--interface"], Store, "interface name")
-            .required();
-        ap.refer(&mut options.target_ip)
-            .add_option(&["--target"], Store, "target ipv4 address")
-            .required();
-        ap.refer(&mut options.gateway_ip)
-            .add_option(&["--gateway"], Store, "gateway ipv4 address")
-            .required();
-        ap.refer(&mut options.log_traffic).add_option(
-            &["--log-traffic"],
-            StoreTrue,
-            "logs all target traffic to `save.pcap`",
-        );
-        ap.refer(&mut options.ip_forward).add_option(
-            &["-n", "--no-forward"],
-            StoreFalse,
-            "leave `/proc/sys/net/ipv4/ip_forward` untouched",
-        );
-        ap.add_option(
-            &["-V", "--version"],
-            Print(env!("CARGO_PKG_VERSION").to_string()),
-            "show version",
-        );
-        ap.parse_args_or_exit();
-    }
-    for ip in [options.target_ip, options.gateway_ip] {
-        if !ip.is_private() {
-            abort!("{} is no private ip address", ip);
+fn main() -> Result<(), NetUtilsError> {
+    // Parse and validate arguments - Program does not proceed if any errors returned
+    let mut args = Cli::parse(); 
+    let device = match args.validate_args() {
+        Ok(device) => device,
+        Err(e) => {
+            eprintln!("Error: {}\n", e);
+            println!("{}\n     {}\n", "Usage:", "target/release/arp-spoof [OPTIONS] -i <INTERFACE> -t <TARGET_IP> -g <GATEWAY_IP>");
+            println!("For more information try -h or --help");
+            std::process::exit(1);
         }
+    };       
+
+    // Define SIGINT handler
+    let sig_action = signal::SigAction::new(
+        SigHandler::Handler(handle_sigint),
+        signal::SaFlags::empty(),
+        signal::SigSet::empty(),
+    );
+    unsafe {
+        signal::sigaction(
+            signal::SIGINT, 
+            &sig_action
+        ).expect("Unable to register SIGINT handler");
     }
-    options
+
+    // Get private IPv4 address associated with given interface - soft exit if not found
+    let interface_ipv4_addr = resolve_private_ipv4(&device)?;
+    
+    // Retreive MAC address of given interface
+    let interface_mac_addr = get_interface_mac_addr(&args.interface)?;
+
+
+    // Enable kernel ip forwarding
+    if args.ip_forward {
+        ip_forward(args.ip_forward)?;
+    }
+
+    // Display network inface info and configurations
+    println!("========================== Network Interface Info ==========================");
+    println!(
+        "Interface:            {}\nIPv4 Address:         {}\nMAC Address:          {}\nConnection Status:    {:?}",
+        device.name,
+        interface_ipv4_addr,
+        mac_to_string(&interface_mac_addr),
+        device.flags.connection_status
+    );
+    println!("============================================================================\n");
+    
+    println!("========================== Tool Configuration ==============================");
+    println!("IPv4 Traffic Forwarding:     {}", if args.ip_forward { "Enabled" } else { "Disabled" });
+    println!("PCAP Traffic Logging:        {}", if args.log_traffic { "Enabled" } else { "Disabled" });
+    println!("============================================================================\n");
+
+    println!("Poisoning ...");
+    arp::arp_poisoning(
+        device,
+        interface_mac_addr,
+        interface_ipv4_addr,
+        Ipv4Addr::from_str(&args.target_ip)?,
+        Ipv4Addr::from_str(&args.gateway_ip)?,
+        args.log_traffic,
+    );
+
+    Ok(())
 }
+

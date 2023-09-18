@@ -24,31 +24,38 @@ Usage:
 Minimal ARP spoofing tool written in Rust.
 
 optional arguments:
-  -h,--help             show this help message and exit
-  -i,--interface INTERFACE
-                        interface name
-  --target TARGET       target ipv4 address
-  --gateway GATEWAY     gateway ipv4 address
-  --log-traffic         logs all target traffic to `save.pcap`
-  -n,--no-forward       leave `/proc/sys/net/ipv4/ip_forward` untouched
-  -V,--version          show version
+  -h,--help                       show this help message and exit
+  -i,--interface INTERFACE        interface name
+  -t, --target_ip TARGET_ip       target ipv4 address
+  -g, --gateway_ip GATEWAY_ip     gateway ipv4 address
+  -l, --log-traffic               logs all target traffic to `save.pcap`
+  -f, --forward                   leave `/proc/sys/net/ipv4/ip_forward` untouched
+  -V,--version                    show version
 ```
 A typical invocation would look like this. The arguments are pretty self-describing.
 ```
-# ./arp-spoof --interface eth0 --target 192.168.0.16 --gateway 192.168.0.1 --log-traffic
-[*] Using device eth0 ...
- -> ip address: 192.168.0.100
- -> mac address: 95:8F:6F:17:36:71
- -> connection_status: Connected
-[+] forwarding ipv4 traffic: true
+# ./arp-spoof -i wlo1 -t 10.0.0.189 -g 10.0.0.1 -l
+========================== Network Interface Info ==========================
+Interface:            wlo1
+IPv4 Address:         10.0.0.92
+MAC Address:          32:C4:8D:20:45:33
+Connection Status:    Connected
+============================================================================
+
+========================== Tool Configuration ==============================
+IPv4 Traffic Forwarding:     Disabled
+PCAP Traffic Logging:        Disabled
+============================================================================
+
+Poisoning ...
 [*] Resolving hosts (this can take a bit) ...
- -> found 7E:FA:8B:B2:F5:8A at 192.168.0.16
- -> found 7C:0B:B6:94:11:6B at 192.168.0.1
-[*] Saving captured packets as save.pcap ...
-[+] Poisoning traffic between 192.168.0.16 <==> 192.168.0.1
+ -> found EC:A7:12:C0:F7:1A at 10.0.0.189
+ -> found 19:C0:3E:B2:AC:22 at 10.0.0.1
+[+] Poisoning traffic between 10.0.0.189 <==> 10.0.0.1
 [*] Received: 274, dropped: 0, if_dropped: 0
 [*] Received: 518, dropped: 0, if_dropped: 0
 ```
+
 # Building
 
 ```
