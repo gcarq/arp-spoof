@@ -170,6 +170,7 @@ fn main() -> Result<(), NetUtilsError> {
         ip_forward(args.ip_forward)?;
     }
 
+    // Display network inface info and configurations
     println!("========================== Network Interface Info ==========================");
     println!(
         "Interface:            {}\nIPv4 Address:         {}\nMAC Address:          {}\nConnection Status:    {:?}",
@@ -183,9 +184,9 @@ fn main() -> Result<(), NetUtilsError> {
     println!("========================== Tool Configuration ==============================");
     println!("IPv4 Traffic Forwarding:     {}", if args.ip_forward { "Enabled" } else { "Disabled" });
     println!("PCAP Traffic Logging:        {}", if args.log_traffic { "Enabled" } else { "Disabled" });
-    println!("============================================================================");
-    
+    println!("============================================================================\n");
 
+    println!("Poisoning ...");
     arp::arp_poisoning(
         device,
         interface_mac_addr,
